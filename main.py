@@ -1,198 +1,80 @@
-from typing import List, Optional
+# ai_server/main.py (중요 부분만 발췌)
 
-from fastapi import FastAPI
+from typing import Any, Dict, List
+
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# =========================
-# 1. FastAPI 앱 & CORS 설정
-# =========================
-
-app = FastAPI(
-    title="LDA Guide API",
-    version="0.1.0",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],      # 개발 단계: 어디서든 호출 허용
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# =========================
-# 2. 데이터 모델 정의
-# =========================
-
-# 브릭 식별자 타입 (그냥 str이지만 의미를 분리)
-BrickId = str
+from image_analysis import analyze_image_bytes  # ★ 방금 만든 서비스 모듈
 
 
-class Brick(BaseModel):
-    id: BrickId
-    x: int
-    y: int
-    z: int
-    color: str
-    type: str
-
-
-class GuideMeta(BaseModel):
-    title: Optional[str] = None
-    width: Optional[int] = None
-    height: Optional[int] = None
-    language: Optional[str] = "ko"   # 기본: 한글
-
-
-class GuideRequest(BaseModel):
-    bricks: List[Brick]
-    meta: Optional[GuideMeta] = None
-
-
-class GuideStep(BaseModel):
-    step: int
-    title: str
-    description: str
-    brickIds: List[BrickId]
-
-
-class GuideStats(BaseModel):
+class GuideSummary(BaseModel):
     totalBricks: int
-    totalSteps: int
+    uniqueTypes: int
+    difficulty: str
+    estimatedTime: str
 
 
 class GuideResponse(BaseModel):
-    steps: List[GuideStep]
-    summary: Optional[str] = None
-    stats: Optional[GuideStats] = None
+    summary: GuideSummary
+    # groups 구조는 아직 확정 X → 느슨하게 Any 사용
+    groups: List[Dict[str, Any]]
 
 
-# =========================
-# 3. 가이드 생성 로직 (Mock)
-# =========================
+SAMPLE_GUIDE: Dict[str, Any] = {
+    "summary": {
+        "totalBricks": 124,
+        "uniqueTypes": 8,
+        "difficulty": "중급",
+        "estimatedTime": "60~90분",
+    },
+    "groups": [
+        {
+            "id": 1,
+            "title": "1단계 - 외곽선 쌓기",
+            "description": "이미지 전체 외곽을 어두운 브릭으로 먼저 쌓아 기준 프레임을 만듭니다.",
+            "stepCount": 3,
+        },
+        {
+            "id": 2,
+            "title": "2단계 - 주요 색상 채우기",
+            "description": "피사체(캐릭터/로고)의 주 색상을 먼저 채우고, 배경은 나중에 채웁니다.",
+            "stepCount": 5,
+        },
+    ],
+}
 
-def generate_mock_guide(request: GuideRequest) -> GuideResponse:
+
+app = FastAPI(title="LDA AI Server")
+
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=True,
+)
+
+
+@app.post("/api/guide/analyze", response_model=GuideResponse)
+async def analyze_image(image: UploadFile = File(...)) -> GuideResponse:
     """
-    간단한 규칙 기반 Mock 가이드:
-    - 브릭을 (y, x) 순서로 정렬
-    - y(줄) 값이 같은 것끼리 묶어서 한 단계(step)로 만든다.
+    업로드된 이미지를 받아서 레고 조립 가이드를 생성하는 엔드포인트.
+    - v1: 이미지 색상/크기 기반 규칙으로 summary + groups 계산.
+    - 실패 시 샘플 가이드를 반환.
     """
-    bricks = sorted(request.bricks, key=lambda b: (b.y, b.x))
+    image_bytes = await image.read()
 
-    steps: List[GuideStep] = []
-    current_y: Optional[int] = None
-    current_group: List[Brick] = []
-    step_index = 1
+    try:
+        data = analyze_image_bytes(image_bytes)
+    except Exception:
+        # TODO: logger를 붙여서 예외 로그 남기면 좋음
+        return GuideResponse(**SAMPLE_GUIDE)
 
-    for brick in bricks:
-        if current_y is None:
-            # 첫 브릭 처리
-            current_y = brick.y
-
-        if brick.y != current_y:
-            # 줄이 바뀌면 이전 줄을 하나의 단계로 확정
-            step = _build_step_from_row(
-                step_index=step_index,
-                row_y=current_y,
-                bricks_in_row=current_group,
-                meta=request.meta,
-            )
-            steps.append(step)
-
-            # 다음 줄 준비
-            step_index += 1
-            current_y = brick.y
-            current_group = []
-
-        current_group.append(brick)
-
-    # 마지막 줄 처리
-    if current_group:
-        step = _build_step_from_row(
-            step_index=step_index,
-            row_y=current_y,
-            bricks_in_row=current_group,
-            meta=request.meta,
-        )
-        steps.append(step)
-
-    # 통계 정보 계산
-    stats = GuideStats(
-        totalBricks=len(request.bricks),
-        totalSteps=len(steps),
-    )
-
-    # 전체 요약 문장 생성
-    summary = _build_summary(meta=request.meta, stats=stats)
-
-    return GuideResponse(
-        steps=steps,
-        summary=summary,
-        stats=stats,
-    )
-
-
-def _build_step_from_row(
-    step_index: int,
-    row_y: int,
-    bricks_in_row: List[Brick],
-    meta: Optional[GuideMeta],
-) -> GuideStep:
-    """
-    y가 같은 브릭 묶음(한 줄)을 하나의 GuideStep으로 변환.
-    """
-    line_number = row_y + 1  # 사람 눈에는 0이 아니라 1번째 줄이 더 자연스러움
-    title = f"{step_index}단계: {line_number}번째 줄 브릭 놓기"
-
-    total = len(bricks_in_row)
-    design_title = meta.title if meta and meta.title else "디자인"
-
-    description = (
-        f"{design_title}의 {line_number}번째 줄에 브릭 {total}개를 "
-        f"왼쪽에서 오른쪽 순서대로 차례대로 놓아 주세요."
-    )
-
-    brick_ids = [b.id for b in bricks_in_row]
-
-    return GuideStep(
-        step=step_index,
-        title=title,
-        description=description,
-        brickIds=brick_ids,
-    )
-
-
-def _build_summary(
-    meta: Optional[GuideMeta],
-    stats: GuideStats,
-) -> str:
-    """
-    전체 가이드를 한 줄로 요약하는 문장 생성.
-    """
-    title = meta.title if meta and meta.title else "이 디자인"
-    return (
-        f"{title}은(는) 총 {stats.totalSteps}단계, "
-        f"{stats.totalBricks}개의 브릭으로 완성됩니다."
-    )
-
-
-# =========================
-# 4. 엔드포인트 정의
-# =========================
-
-@app.post("/api/guide", response_model=GuideResponse)
-async def create_guide(request: GuideRequest) -> GuideResponse:
-    """
-    프론트에서 조립 가이드를 요청하는 엔드포인트.
-    """
-    guide = generate_mock_guide(request)
-    return guide
-
-
-@app.get("/health")
-async def health():
-    """
-    서버 헬스 체크용 엔드포인트.
-    """
-    return {"status": "ok"}
+    return GuideResponse(**data)
