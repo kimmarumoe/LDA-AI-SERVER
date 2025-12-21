@@ -15,7 +15,10 @@ app = FastAPI(
 # 프론트(Vite dev 서버)에서 접근할 수 있도록 CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:5173",
+                   "http://127.0.0.1:5173",
+                   "https://lda-legodesignaid.vercel.app",
+],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
