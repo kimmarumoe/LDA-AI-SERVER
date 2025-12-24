@@ -2,27 +2,18 @@
 from __future__ import annotations
 
 import os
-from typing import List, Optional
+from dotenv import load_dotenv
 
-
-def _csv(key: str, default: str = "") -> List[str]:
-    raw = os.getenv(key, default).strip()
-    if not raw:
-        return []
-    return [x.strip() for x in raw.split(",") if x.strip()]
-
+# .env는 로컬 개발 편의용, 배포 환경 변수 덮어쓰지 않게
+load_dotenv(override=False)
 
 def app_env() -> str:
-    # local | preview | prod
-    return os.getenv("APP_ENV", "local").strip().lower()
+    return (os.getenv("ENV") or os.getenv("APP_ENV") or "local").strip().lower()
 
+def cors_allow_origins():
+    v = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+    return v
 
-def cors_allow_origins() -> List[str]:
-    # 예: CORS_ALLOW_ORIGINS="http://localhost:5173,https://xxx.vercel.app"
-    return _csv("CORS_ALLOW_ORIGINS")
-
-
-def cors_allow_origin_regex() -> Optional[str]:
-    # 예: CORS_ALLOW_ORIGIN_REGEX="^https://.*\.vercel\.app$"
-    raw = os.getenv("CORS_ALLOW_ORIGIN_REGEX", "").strip()
-    return raw or None
+def cors_allow_origin_regex():
+    v = os.getenv("CORS_ALLOW_ORIGIN_REGEX", "").strip()
+    return v or None

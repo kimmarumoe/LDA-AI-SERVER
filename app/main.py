@@ -1,6 +1,9 @@
 # app/main.py
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -10,8 +13,8 @@ from app.core.env import app_env, cors_allow_origins, cors_allow_origin_regex
 from app.core.errors import error_payload, register_exception_handlers
 from app.routers.guide import router as guide_router
 
-app = FastAPI()
-register_exception_handlers(app)
+
+logger = logging.getLogger("uvicorn.error")
 
 ENV = (app_env() or "local").lower()
 
@@ -21,18 +24,24 @@ if isinstance(origins, str):
 
 origin_regex = cors_allow_origin_regex()
 
-# local 기본값
 if ENV == "local" and not origins and not origin_regex:
     origins = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ]
 
-# prod 기본값: vercel preview/배포 도메인 대응
 if ENV == "prod" and not origin_regex:
-    origin_regex = r"^https://.*\.vercel\.app$"
+    origin_regex = r"https://.*\.vercel\.app"
 
-print(f"[BOOT] ENV={ENV} origins={origins} origin_regex={origin_regex}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("[BOOT] ENV=%s origins=%s origin_regex=%s", ENV, origins, origin_regex)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+register_exception_handlers(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,6 +52,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
@@ -52,6 +62,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             message=str(exc.detail) if exc.detail else "요청 처리 중 오류가 발생했습니다.",
         ),
     )
+
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -64,6 +75,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         ),
     )
 
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
@@ -74,8 +86,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         ),
     )
 
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
+
 
 app.include_router(guide_router)
