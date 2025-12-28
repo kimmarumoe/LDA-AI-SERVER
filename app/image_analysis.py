@@ -14,38 +14,58 @@ from .models.guide import (
     GuideStep,
     PaletteItem,
     GuideMeta,
-    GuideResponse,
 )
-
-GRID_WIDTH = 16
-GRID_HEIGHT = 16
-
 
 def rgb_to_hex(rgb: Tuple[int, int, int]) -> str:
     r, g, b = rgb
     return f"#{r:02X}{g:02X}{b:02X}"
 
+def clamp_int(value: int, default: int, min_v: int, max_v: int) -> int:
+    if not isinstance(value, int):
+        return default
+    return max(min_v, min(max_v, value))
 
-async def analyze_image_to_guide(image: UploadFile) -> GuideResponse:
+async def analyze_image_to_guide(
+    image: UploadFile,
+    grid_w: int = 16,
+    grid_h: int = 16,
+    max_colors: int = 16,
+):
     """
-    업로드된 이미지를 16x16 모자이크로 단순 변환하고,
-    1행 단위로 조립 가이드(steps/groups)를 생성합니다.
+    업로드된 이미지를 grid_w x grid_h 모자이크로 변환하고,
+    1행 단위로 조립 가이드(steps)를 생성합니다.
     """
+
+    # ✅ 안전장치 (라우트에서도 검증하더라도 2중 방어)
+    grid_w = clamp_int(grid_w, 16, 8, 128)
+    grid_h = clamp_int(grid_h, 16, 8, 128)
+    max_colors = clamp_int(max_colors, 16, 2, 256)
 
     # 1) 업로드 파일 -> PIL 이미지
     file_bytes = await image.read()
     pil = Image.open(BytesIO(file_bytes)).convert("RGB")
 
-    # 2) 16x16 리사이즈 (각 픽셀 = 1 브릭)
-    resized = pil.resize((GRID_WIDTH, GRID_HEIGHT), Image.NEAREST)
+    # ✅ 2) grid_w x grid_h 리사이즈 (여기가 16으로 남아있으면 32/48에서 바로 터짐)
+    resized = pil.resize((grid_w, grid_h), Image.NEAREST)
+
+    # ✅ 3) 색상 수 제한 (Pillow 버전/환경 따라 실패할 수 있어 안전하게 처리)
+    if max_colors < 256:
+        try:
+            method = getattr(Image, "MEDIANCUT", 0)
+            resized = resized.quantize(colors=max_colors, method=method).convert("RGB")
+        except Exception:
+            # quantize 실패해도 분석 자체는 진행(500 방지)
+            resized = resized.convert("RGB")
+
     img_np = np.array(resized)  # (H, W, 3)
+    h, w = img_np.shape[:2]     # ✅ 실제 크기를 기준으로 루프(불일치 방지)
 
     bricks: List[Brick] = []
     palette_counter: Dict[str, Dict[str, Any]] = {}
 
-    # 3) 픽셀 단위로 Brick 생성 + 팔레트 카운트
-    for y in range(GRID_HEIGHT):
-        for x in range(GRID_WIDTH):
+    # 4) 픽셀 단위로 Brick 생성 + 팔레트 카운트
+    for y in range(h):
+        for x in range(w):
             r, g, b = img_np[y, x]
             hex_color = rgb_to_hex((int(r), int(g), int(b)))
 
@@ -55,7 +75,7 @@ async def analyze_image_to_guide(image: UploadFile) -> GuideResponse:
                     y=y,
                     z=0,
                     color=hex_color,
-                    type="plate",  # MVP: 전부 1x1 plate 취급
+                    type="plate",
                 )
             )
 
@@ -66,7 +86,7 @@ async def analyze_image_to_guide(image: UploadFile) -> GuideResponse:
             bucket["count"] += 1
             bucket["types"].add("plate")
 
-    # 4) inventory (색상별 1x1 plate 수량)
+    # 5) inventory
     inventory = [
         {
             "type": "plate_1x1",
@@ -83,9 +103,9 @@ async def analyze_image_to_guide(image: UploadFile) -> GuideResponse:
         )
     ]
 
-    # 5) 조립 순서: 행(row) 단위 16단계
+    # ✅ 6) 조립 순서: 행(row) 단위 h 단계
     steps: List[GuideStep] = []
-    for y in range(GRID_HEIGHT):
+    for y in range(h):
         row_bricks = [b for b in bricks if b.y == y]
         steps.append(
             GuideStep(
@@ -96,7 +116,7 @@ async def analyze_image_to_guide(image: UploadFile) -> GuideResponse:
             )
         )
 
-    # 6) palette 리스트
+    # 7) palette 리스트
     palette = [
         PaletteItem(
             color=hex_code,
@@ -111,7 +131,7 @@ async def analyze_image_to_guide(image: UploadFile) -> GuideResponse:
         )
     ]
 
-    # 7) summary / meta / tips
+    # 8) summary / meta / tips
     total_bricks = len(bricks)
     unique_colors = len(palette)
 
@@ -122,7 +142,7 @@ async def analyze_image_to_guide(image: UploadFile) -> GuideResponse:
         difficulty = "중급"
         estimated_time = "45~90분"
     else:
-        difficulty = "상급"
+        difficulty = "고급" 
         estimated_time = "90분 이상"
 
     summary = GuideSummary(
@@ -132,9 +152,10 @@ async def analyze_image_to_guide(image: UploadFile) -> GuideResponse:
         estimatedTime=estimated_time,
     )
 
+    # meta도 실제 w/h로 기록(H4 핵심)
     meta = GuideMeta(
-        width=GRID_WIDTH,
-        height=GRID_HEIGHT,
+        width=w,
+        height=h,
         createdAt=datetime.utcnow(),
         source="ai",
     )
@@ -144,8 +165,6 @@ async def analyze_image_to_guide(image: UploadFile) -> GuideResponse:
         "위에서 아래로(행 단위) 내려오며 배치하면 전체 모양을 확인하기 쉽습니다.",
     ]
 
-    # ✅ GuideResponse 스키마가 extra를 허용하지 않는 경우를 대비해
-    #    모델 생성 대신 dict로 반환해도 FastAPI가 response_model로 필터링합니다.
     return {
         "summary": summary,
         "bricks": bricks,
