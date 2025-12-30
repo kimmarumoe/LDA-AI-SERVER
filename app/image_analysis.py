@@ -1,6 +1,6 @@
 # app/image_analysis.py
 
-from datetime import datetime
+from datetime import datetime, timezone
 from io import BytesIO
 from typing import Dict, Any, Tuple, List
 
@@ -25,40 +25,61 @@ def clamp_int(value: int, default: int, min_v: int, max_v: int) -> int:
         return default
     return max(min_v, min(max_v, value))
 
+def clamp_optional_int(value: int | None, default: int, min_v: int, max_v: int) -> int | None:
+    # None은 "제한 없음"
+    if value is None:
+        return None
+
+    # 0 이하면 "제한 없음" (라우터에서 처리하더라도 2중 방어)
+    if isinstance(value, int) and value <= 0:
+        return None
+
+    # bool은 int의 하위 타입이라 걸러주는 게 안전
+    if isinstance(value, bool):
+        return default
+
+    # int가 아니면 기본값으로
+    if not isinstance(value, int):
+        return default
+
+    return max(min_v, min(max_v, value))
+
 async def analyze_image_to_guide(
     image: UploadFile,
     grid_w: int = 16,
     grid_h: int = 16,
-    max_colors: int = 16,
+    max_colors: int | None = 16,
 ):
     """
     업로드된 이미지를 grid_w x grid_h 모자이크로 변환하고,
     1행 단위로 조립 가이드(steps)를 생성합니다.
     """
 
-    # ✅ 안전장치 (라우트에서도 검증하더라도 2중 방어)
+    #  grid는 항상 범위 제한
     grid_w = clamp_int(grid_w, 16, 8, 128)
     grid_h = clamp_int(grid_h, 16, 8, 128)
-    max_colors = clamp_int(max_colors, 16, 2, 256)
+
+    # max_colors는 None(제한 없음) 유지 + 숫자일 때만 clamp
+    max_colors = clamp_optional_int(max_colors, 16, 2, 256)
 
     # 1) 업로드 파일 -> PIL 이미지
     file_bytes = await image.read()
     pil = Image.open(BytesIO(file_bytes)).convert("RGB")
 
-    # ✅ 2) grid_w x grid_h 리사이즈 (여기가 16으로 남아있으면 32/48에서 바로 터짐)
+    # 2) grid_w x grid_h 리사이즈
     resized = pil.resize((grid_w, grid_h), Image.NEAREST)
 
-    # ✅ 3) 색상 수 제한 (Pillow 버전/환경 따라 실패할 수 있어 안전하게 처리)
-    if max_colors < 256:
+    # 3) 색상 수 제한
+    # ✅ max_colors=None 이면 제한 없음 → quantize 스킵
+    if max_colors is not None and max_colors < 256:
         try:
             method = getattr(Image, "MEDIANCUT", 0)
             resized = resized.quantize(colors=max_colors, method=method).convert("RGB")
         except Exception:
-            # quantize 실패해도 분석 자체는 진행(500 방지)
             resized = resized.convert("RGB")
 
     img_np = np.array(resized)  # (H, W, 3)
-    h, w = img_np.shape[:2]     # ✅ 실제 크기를 기준으로 루프(불일치 방지)
+    h, w = img_np.shape[:2]
 
     bricks: List[Brick] = []
     palette_counter: Dict[str, Dict[str, Any]] = {}
@@ -103,10 +124,11 @@ async def analyze_image_to_guide(
         )
     ]
 
-    # ✅ 6) 조립 순서: 행(row) 단위 h 단계
+    # 6) 조립 순서: 행(row) 단위 h 단계
+    # ✅ bricks가 row-major로 쌓이므로 슬라이스로 바로 자르기 (빠르고 단순)
     steps: List[GuideStep] = []
     for y in range(h):
-        row_bricks = [b for b in bricks if b.y == y]
+        row_bricks = bricks[y * w : (y + 1) * w]
         steps.append(
             GuideStep(
                 id=y + 1,
@@ -142,7 +164,7 @@ async def analyze_image_to_guide(
         difficulty = "중급"
         estimated_time = "45~90분"
     else:
-        difficulty = "고급" 
+        difficulty = "고급"
         estimated_time = "90분 이상"
 
     summary = GuideSummary(
@@ -152,11 +174,10 @@ async def analyze_image_to_guide(
         estimatedTime=estimated_time,
     )
 
-    # meta도 실제 w/h로 기록(H4 핵심)
     meta = GuideMeta(
         width=w,
         height=h,
-        createdAt=datetime.utcnow(),
+        createdAt=datetime.now(timezone.utc),  # ✅ utcnow 경고 회피
         source="ai",
     )
 

@@ -11,62 +11,87 @@ router = APIRouter(prefix="/api/guide", tags=["guide"])
 ALLOWED_GRID = {"16x16": (16, 16), "32x32": (32, 32), "48x48": (48, 48)}
 ALLOWED_COLORS = {8, 16, 24}
 
+
 def parse_grid_size(grid_size: Optional[str]) -> Tuple[int, int]:
     if not grid_size:
         return (16, 16)
+
     key = grid_size.replace(" ", "").lower()
     if key not in ALLOWED_GRID:
         raise HTTPException(status_code=422, detail=f"Invalid grid_size: {grid_size}")
+
     return ALLOWED_GRID[key]
 
-def parse_max_colors(max_colors: Optional[int]) -> int:
+
+def parse_max_colors(max_colors: Optional[int]) -> Optional[int]:
+    """
+    - None(미전송): 기본 16 (기존 UX 유지)
+    - 0 이하: 제한 없음(None)
+    - 8/16/24: 허용
+    """
     if max_colors is None:
         return 16
+
+    if max_colors <= 0:
+        return None
+
     if max_colors not in ALLOWED_COLORS:
         raise HTTPException(status_code=422, detail=f"Invalid max_colors: {max_colors}")
+
     return max_colors
+
 
 def merge_options(
     options_json: Optional[str],
     grid_size: Optional[str],
     max_colors: Optional[int],
-) -> tuple[int, int, int]:
-    # 1) 기본: Form 필드 기준
+) -> tuple[int, int, Optional[int]]:
+    # 1) 기본: 개별 Form 필드 기준
     grid_w, grid_h = parse_grid_size(grid_size)
     colors = parse_max_colors(max_colors)
 
     # 2) options(JSON) 호환 처리
-    if options_json:
-        try:
-            obj = json.loads(options_json)
-        except Exception:
-            obj = None
+    if not options_json:
+        return grid_w, grid_h, colors
 
-        if isinstance(obj, dict):
-            # 프론트 최신: { gridSize, maxColors }
-            gs = obj.get("gridSize")
-            mc = obj.get("maxColors")
+    try:
+        obj = json.loads(options_json)
+    except Exception:
+        raise HTTPException(status_code=400, detail="options JSON이 올바르지 않습니다.")
 
-            if isinstance(gs, str):
-                key = gs.replace(" ", "").lower()
-                if key in ALLOWED_GRID:
-                    grid_w, grid_h = ALLOWED_GRID[key]
+    if not isinstance(obj, dict):
+        return grid_w, grid_h, colors
 
-            if isinstance(mc, int):
-                colors = parse_max_colors(mc)
+    # 최신: { gridSize, maxColors }
+    gs = obj.get("gridSize")
+    mc = obj.get("maxColors")
 
-            # 과거/혼용: colorLimit
-            cl = obj.get("colorLimit")
-            if isinstance(cl, int):
-                colors = parse_max_colors(cl)
+    if isinstance(gs, str):
+        key = gs.replace(" ", "").lower()
+        if key in ALLOWED_GRID:
+            grid_w, grid_h = ALLOWED_GRID[key]
+        else:
+            raise HTTPException(status_code=422, detail=f"Invalid gridSize in options: {gs}")
 
-            # 과거 구조: grid:{width,height}
-            g = obj.get("grid")
-            if isinstance(g, dict):
-                w = g.get("width")
-                h = g.get("height")
-                if isinstance(w, int) and isinstance(h, int):
-                    grid_w, grid_h = (w, h)
+    if isinstance(mc, int):
+        colors = parse_max_colors(mc)
+
+    # 과거/혼용: colorLimit
+    cl = obj.get("colorLimit")
+    if isinstance(cl, int):
+        colors = parse_max_colors(cl)
+
+    # 과거 구조: grid:{width,height}
+    g = obj.get("grid")
+    if isinstance(g, dict):
+        w = g.get("width")
+        h = g.get("height")
+        if isinstance(w, int) and isinstance(h, int):
+            key = f"{w}x{h}".lower()
+            if key in ALLOWED_GRID:
+                grid_w, grid_h = ALLOWED_GRID[key]
+            else:
+                raise HTTPException(status_code=422, detail=f"Invalid grid in options: {w}x{h}")
 
     return grid_w, grid_h, colors
 
@@ -83,5 +108,10 @@ async def analyze_guide(
 
     grid_w, grid_h, colors = merge_options(options, grid_size, max_colors)
 
-    # 분석 함수가 이 파라미터를 받아서 실제로 써야 결과가 바뀜
-    return await analyze_image_to_guide(image, grid_w=grid_w, grid_h=grid_h, max_colors=colors)
+    # colors가 None이면 "제한 없음"
+    return await analyze_image_to_guide(
+        image,
+        grid_w=grid_w,
+        grid_h=grid_h,
+        max_colors=colors,
+    )
