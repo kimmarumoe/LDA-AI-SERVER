@@ -1,4 +1,3 @@
-# app/image_analysis.py
 from datetime import datetime, timezone
 from io import BytesIO
 from typing import Dict, Any, Tuple, List, Optional
@@ -8,7 +7,7 @@ import numpy as np
 from fastapi import UploadFile, HTTPException
 from PIL import Image
 
-from .models.guide import (
+from app.models.guide import (
     Brick,
     GuideSummary,
     GuideStep,
@@ -29,20 +28,14 @@ def clamp_int(value: int, default: int, min_v: int, max_v: int) -> int:
 
 
 def clamp_optional_int(value: int | None, default: int, min_v: int, max_v: int) -> int | None:
-    # None은 "제한 없음"
     if value is None:
         return None
-
-    # 0 이하면 "제한 없음"
     if isinstance(value, int) and not isinstance(value, bool) and value <= 0:
         return None
-
     if isinstance(value, bool):
         return default
-
     if not isinstance(value, int):
         return default
-
     return max(min_v, min(max_v, value))
 
 
@@ -51,15 +44,13 @@ _BRICK_RE = re.compile(r"^(?P<w>\d+)x(?P<h>\d+)$")
 
 def parse_brick_type_dims(brick_type: str) -> tuple[int, int]:
     """
-    "2x5" 형태면 (2,5) 반환.
+    "2x3" 형태면 (2,3) 반환.
     그 외는 (1,1)로 간주.
     """
     if not brick_type:
         return (1, 1)
 
     s = str(brick_type).strip().lower()
-
-    # "plate_2x5" 같은 형태도 허용하고 싶으면 여기서 확장 가능
     m = _BRICK_RE.match(s)
     if not m:
         return (1, 1)
@@ -70,36 +61,103 @@ def parse_brick_type_dims(brick_type: str) -> tuple[int, int]:
     except Exception:
         return (1, 1)
 
-    # 안전 범위
     w = max(1, min(64, w))
     h = max(1, min(64, h))
     return (w, h)
 
 
-def select_brick_type(brick_types: Optional[List[str]]) -> str:
+def normalize_brick_types(brick_types: Optional[List[str]]) -> List[str]:
     """
-    brick_types가 여러 개면, 가장 면적이 큰 타입을 우선 선택.
-    예: ["1x1","1x2","2x3"] -> "2x3"
+    - 입력이 없으면 기본 ["1x1"]
+    - 입력이 있으면 정리 + 항상 "1x1"을 fallback으로 포함(빈칸 방지)
     """
     if not brick_types:
-        return "plate"
+        return ["1x1"]
 
-    cleaned = [str(x).strip() for x in brick_types if isinstance(x, str) and str(x).strip()]
-    if not cleaned:
-        return "plate"
+    cleaned: List[str] = []
+    seen = set()
 
-    # 숫자형 "WxH"가 섞여 있으면 가장 큰 면적을 선택
-    best = cleaned[0]
-    best_area = 1
+    for x in brick_types:
+        if not isinstance(x, str):
+            continue
+        s = x.strip().lower()
+        if not s:
+            continue
+        w, h = parse_brick_type_dims(s)
+        key = f"{w}x{h}"
+        if key not in seen:
+            cleaned.append(key)
+            seen.add(key)
 
-    for t in cleaned:
+    if "1x1" not in seen:
+        cleaned.append("1x1")
+
+    return cleaned
+
+
+def build_candidates(brick_types: List[str], allow_rotate: bool) -> List[tuple[str, int, int, int]]:
+    """
+    반환: (type_str, w, h, area) 리스트
+    - 큰 면적 우선 정렬
+    - allow_rotate면 (w,h)와 (h,w) 둘 다 후보로 추가(서로 다를 때만)
+    """
+    out: List[tuple[str, int, int, int]] = []
+    seen = set()
+
+    for t in brick_types:
         w, h = parse_brick_type_dims(t)
-        area = w * h
-        if area > best_area:
-            best = t
-            best_area = area
+        key = (w, h)
+        if key not in seen:
+            out.append((f"{w}x{h}", w, h, w * h))
+            seen.add(key)
 
-    return best
+        if allow_rotate and w != h:
+            key2 = (h, w)
+            if key2 not in seen:
+                out.append((f"{h}x{w}", h, w, h * w))
+                seen.add(key2)
+
+    out.sort(key=lambda x: (x[3], x[1], x[2]), reverse=True)
+    return out
+
+
+def can_place(
+    colors_grid: List[List[str]],
+    occ: List[List[bool]],
+    x: int,
+    y: int,
+    bw: int,
+    bh: int,
+    target_color: str,
+) -> bool:
+    h = len(colors_grid)
+    w = len(colors_grid[0]) if h else 0
+
+    if x + bw > w or y + bh > h:
+        return False
+
+    for yy in range(y, y + bh):
+        row_c = colors_grid[yy]
+        row_o = occ[yy]
+        for xx in range(x, x + bw):
+            if row_o[xx]:
+                return False
+            if row_c[xx] != target_color:
+                return False
+
+    return True
+
+
+def place(
+    occ: List[List[bool]],
+    x: int,
+    y: int,
+    bw: int,
+    bh: int,
+) -> None:
+    for yy in range(y, y + bh):
+        for xx in range(x, x + bw):
+            occ[yy][xx] = True
 
 
 async def analyze_image_to_guide(
@@ -108,26 +166,21 @@ async def analyze_image_to_guide(
     grid_h: int = 16,
     max_colors: int | None = 16,
     brick_types: Optional[List[str]] = None,
+    allow_rotate: bool = True,
 ) -> Dict[str, Any]:
     """
-    업로드된 이미지를 grid_w x grid_h 모자이크로 변환하고,
-    행(row) 단위로 조립 가이드(groups/steps)를 생성합니다.
-
-    주의:
-    - 현재는 픽셀 1개당 Brick 1개 생성(1x1 방식)이라 totalBricks는 grid 크기에 고정됩니다.
-    - brick_types는 Brick.type 값/인벤토리 표기에 반영됩니다.
-      (큰 브릭으로 묶어서 개수를 줄이는 타일링 로직은 별도 구현이 필요)
+    타일링(패킹) 버전:
+    - 셀 색상이 동일한 영역에서 큰 브릭부터 배치
+    - 남는 칸은 1x1로 메움(항상 fallback 포함)
+    - allow_rotate=True면 1x3 <-> 3x1 자동 배치 가능
     """
 
-    # grid는 항상 범위 제한
     grid_w = clamp_int(grid_w, 16, 8, 128)
     grid_h = clamp_int(grid_h, 16, 8, 128)
-
-    # max_colors는 None(제한 없음) 유지 + 숫자일 때만 clamp
     max_colors = clamp_optional_int(max_colors, 16, 2, 256)
 
-    selected_type = select_brick_type(brick_types)
-    bt_w, bt_h = parse_brick_type_dims(selected_type)
+    bt = normalize_brick_types(brick_types)
+    candidates = build_candidates(bt, allow_rotate)
 
     # 1) 업로드 파일 -> PIL 이미지
     try:
@@ -140,7 +193,6 @@ async def analyze_image_to_guide(
     resized = pil.resize((grid_w, grid_h), Image.NEAREST)
 
     # 3) 색상 수 제한
-    # max_colors=None 이면 제한 없음 -> quantize 스킵
     if max_colors is not None and max_colors < 256:
         try:
             method = getattr(Image, "MEDIANCUT", 0)
@@ -151,68 +203,100 @@ async def analyze_image_to_guide(
     img_np = np.array(resized)  # (H, W, 3)
     h, w = img_np.shape[:2]
 
-    bricks: List[Brick] = []
-    palette_counter: Dict[str, Dict[str, Any]] = {}
-
-    # 4) 픽셀 단위로 Brick 생성 + 팔레트 카운트
-    # groupId는 "행 단위 그룹"과 맞추기 위해 (y+1)로 지정
+    # 색상 그리드(hex) 구성
+    colors_grid: List[List[str]] = []
     for y in range(h):
-        gid = y + 1
+        row: List[str] = []
         for x in range(w):
             r, g, b = img_np[y, x]
-            hex_color = rgb_to_hex((int(r), int(g), int(b)))
+            row.append(rgb_to_hex((int(r), int(g), int(b))))
+        colors_grid.append(row)
 
-            bricks.append(
-                Brick(
-                    x=x,
-                    y=y,
-                    z=0,
-                    color=hex_color,
-                    type=selected_type if selected_type != "plate" else "plate",
-                    groupId=gid,
+    occ: List[List[bool]] = [[False] * w for _ in range(h)]
+
+    bricks: List[Brick] = []
+    palette_counter: Dict[str, Dict[str, Any]] = {}
+    inventory_counter: Dict[tuple[str, str], int] = {}
+
+    # 4) 타일링(그리디): 좌상단부터 훑으면서 큰 브릭부터 시도
+    for y in range(h):
+        gid = y + 1  # 시작 y 기준으로 행 그룹
+        for x in range(w):
+            if occ[y][x]:
+                continue
+
+            target_color = colors_grid[y][x]
+            placed_any = False
+
+            for type_str, bw, bh, _area in candidates:
+                if can_place(colors_grid, occ, x, y, bw, bh, target_color):
+                    place(occ, x, y, bw, bh)
+
+                    bricks.append(
+                        Brick(
+                            x=x,
+                            y=y,
+                            z=0,
+                            color=target_color,
+                            type=type_str,
+                            groupId=gid,
+                        )
+                    )
+
+                    # 팔레트/인벤토리: "브릭 개수" 기준으로 집계
+                    bucket = palette_counter.setdefault(
+                        target_color,
+                        {"name": target_color, "count": 0, "types": set()},
+                    )
+                    bucket["count"] += 1
+                    bucket["types"].add(type_str)
+
+                    inventory_counter[(type_str, target_color)] = (
+                        inventory_counter.get((type_str, target_color), 0) + 1
+                    )
+
+                    placed_any = True
+                    break
+
+            if not placed_any:
+                # candidates에 항상 1x1이 포함되므로 보통 여기로 오지 않음
+                place(occ, x, y, 1, 1)
+                bricks.append(
+                    Brick(
+                        x=x,
+                        y=y,
+                        z=0,
+                        color=target_color,
+                        type="1x1",
+                        groupId=gid,
+                    )
                 )
-            )
+                bucket = palette_counter.setdefault(
+                    target_color,
+                    {"name": target_color, "count": 0, "types": set()},
+                )
+                bucket["count"] += 1
+                bucket["types"].add("1x1")
+                inventory_counter[("1x1", target_color)] = inventory_counter.get(("1x1", target_color), 0) + 1
 
-            bucket = palette_counter.setdefault(
-                hex_color,
-                {"name": hex_color, "count": 0, "types": set()},
-            )
-            bucket["count"] += 1
-            bucket["types"].add(selected_type if selected_type != "plate" else "plate")
+    # 5) steps: 행 단위(시작 y 기준)로 묶기
+    bricks_by_row: List[List[Brick]] = [[] for _ in range(h)]
+    for b in bricks:
+        if 0 <= b.y < h:
+            bricks_by_row[b.y].append(b)
 
-    # 5) inventory
-    # 현재는 색상별로 동일 type 1종만 쌓이므로 단순 집계
-    inv_type = "plate_1x1" if selected_type == "plate" else f"plate_{bt_w}x{bt_h}"
-    inventory = [
-        {
-            "type": inv_type,
-            "width": 1 if selected_type == "plate" else bt_w,
-            "height": 1 if selected_type == "plate" else bt_h,
-            "hex": hex_code,
-            "color": hex_code,
-            "count": data["count"],
-        }
-        for hex_code, data in sorted(
-            palette_counter.items(),
-            key=lambda item: item[1]["count"],
-            reverse=True,
-        )
-    ]
-
-    # 6) 조립 순서: 행(row) 단위 h 단계
     steps: List[GuideStep] = []
     for y in range(h):
-        row_bricks = bricks[y * w : (y + 1) * w]
         steps.append(
             GuideStep(
                 id=y + 1,
                 title=f"{y + 1}행 배치",
                 description="왼쪽에서 오른쪽 순서로 배치합니다.",
-                bricks=row_bricks,
+                bricks=bricks_by_row[y],
             )
         )
 
-    # 7) palette 리스트
+    # 6) palette 리스트
     palette = [
         PaletteItem(
             color=hex_code,
@@ -227,14 +311,33 @@ async def analyze_image_to_guide(
         )
     ]
 
-    # 8) summary / meta / tips
-    total_bricks = len(bricks)
-    unique_colors = len(palette)  # 기존 API의 uniqueTypes가 사실상 "유니크 색상 수"로 쓰이는 상황 유지
+    # 7) inventory 리스트
+    inventory: List[Dict[str, Any]] = []
+    for (type_str, hex_code), count in sorted(
+        inventory_counter.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    ):
+        bw, bh = parse_brick_type_dims(type_str)
+        inventory.append(
+            {
+                "type": f"plate_{bw}x{bh}",
+                "width": bw,
+                "height": bh,
+                "hex": hex_code,
+                "color": hex_code,
+                "count": count,
+            }
+        )
 
-    if total_bricks <= 128:
+    # 8) summary / meta / tips
+    total_bricks = len(bricks)          # 타일링 결과 브릭 개수 (이제 w*h 고정 아님)
+    unique_colors = len(palette)        # 유니크 색상 수
+
+    if w * h <= 128:
         difficulty = "초급"
         estimated_time = "30~45분"
-    elif total_bricks <= 256:
+    elif w * h <= 256:
         difficulty = "중급"
         estimated_time = "45~90분"
     else:
@@ -256,8 +359,9 @@ async def analyze_image_to_guide(
     )
 
     tips = [
-        "조립 전, 색상별로 브릭을 먼저 분류해 두면 훨씬 빠르게 조립할 수 있습니다.",
-        "위에서 아래로(행 단위) 내려오며 배치하면 전체 모양을 확인하기 쉽습니다.",
+        "큰 브릭부터 배치하고 남는 칸은 1x1로 메우는 방식입니다.",
+        "회전 허용 시 1x3은 3x1로 자동 배치될 수 있습니다.",
+        "색이 완전히 같은 영역에서만 큰 브릭이 들어갑니다.",
     ]
 
     return {

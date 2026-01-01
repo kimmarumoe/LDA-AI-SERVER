@@ -1,4 +1,3 @@
-# app/routers/guide.py
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from typing import Optional, Tuple, List
 import json
@@ -41,13 +40,35 @@ def parse_max_colors(max_colors: Optional[int]) -> Optional[int]:
     return max_colors
 
 
+def parse_allow_rotate(v: object) -> bool:
+    """
+    - 미전송: 기본 True
+    - bool: 그대로
+    - str: "true/false/1/0/yes/no" 등 파싱
+    """
+    if v is None:
+        return True
+
+    if isinstance(v, bool):
+        return v
+
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("1", "true", "yes", "y", "on"):
+            return True
+        if s in ("0", "false", "no", "n", "off"):
+            return False
+
+    return True
+
+
 def _parse_brick_types_value(v: object) -> Optional[List[str]]:
     """
     허용 입력:
-    - ["2x5", "1x2"] 같은 list[str]
-    - "2x5" 같은 단일 string
-    - '["2x5","1x2"]' 같은 JSON string
-    - "2x5,1x2" 같은 콤마 구분 string
+    - ["2x3", "1x2"] 같은 list[str]
+    - "2x3" 같은 단일 string
+    - '["2x3","1x2"]' 같은 JSON string
+    - "2x3,1x2" 같은 콤마 구분 string
     """
     if v is None:
         return None
@@ -63,7 +84,6 @@ def _parse_brick_types_value(v: object) -> Optional[List[str]]:
         if not s:
             return None
 
-        # JSON 배열 문자열
         if s.startswith("["):
             try:
                 arr = json.loads(s)
@@ -73,7 +93,6 @@ def _parse_brick_types_value(v: object) -> Optional[List[str]]:
             except Exception:
                 pass
 
-        # 단일 값 또는 콤마 구분
         parts = [p.strip() for p in s.split(",") if p.strip()]
         return parts or None
 
@@ -85,15 +104,17 @@ def merge_options(
     grid_size: Optional[str],
     max_colors: Optional[int],
     brick_types: Optional[str],
-) -> tuple[int, int, Optional[int], Optional[List[str]]]:
+    allow_rotate: Optional[str],
+) -> tuple[int, int, Optional[int], Optional[List[str]], bool]:
     # 1) 기본: 개별 Form 필드 기준
     grid_w, grid_h = parse_grid_size(grid_size)
     colors = parse_max_colors(max_colors)
     bt_list = _parse_brick_types_value(brick_types)
+    rotate = parse_allow_rotate(allow_rotate)
 
     # 2) options(JSON) 호환 처리
     if not options_json:
-        return grid_w, grid_h, colors, bt_list
+        return grid_w, grid_h, colors, bt_list, rotate
 
     try:
         obj = json.loads(options_json)
@@ -101,11 +122,12 @@ def merge_options(
         raise HTTPException(status_code=400, detail="options JSON이 올바르지 않습니다.")
 
     if not isinstance(obj, dict):
-        return grid_w, grid_h, colors, bt_list
+        return grid_w, grid_h, colors, bt_list, rotate
 
-    # 최신: { gridSize, maxColors }
+    # 최신: { gridSize, maxColors, allowRotate }
     gs = obj.get("gridSize") or obj.get("grid_size")
     mc = obj.get("maxColors") or obj.get("max_colors")
+    ar = obj.get("allowRotate") or obj.get("allow_rotate") or obj.get("rotate")
 
     if isinstance(gs, str):
         key = gs.replace(" ", "").lower()
@@ -140,7 +162,9 @@ def merge_options(
     if parsed_bt:
         bt_list = parsed_bt
 
-    return grid_w, grid_h, colors, bt_list
+    rotate = parse_allow_rotate(ar) if ar is not None else rotate
+
+    return grid_w, grid_h, colors, bt_list, rotate
 
 
 @router.post("/analyze", response_model=GuideResponse)
@@ -150,16 +174,20 @@ async def analyze_guide(
     grid_size: Optional[str] = Form(None),
     max_colors: Optional[int] = Form(None),
     brick_types: Optional[str] = Form(None),
+    allow_rotate: Optional[str] = Form(None),
 ) -> GuideResponse:
     if not image:
         raise HTTPException(status_code=400, detail="이미지 파일이 필요합니다.")
 
-    grid_w, grid_h, colors, bt_list = merge_options(options, grid_size, max_colors, brick_types)
+    grid_w, grid_h, colors, bt_list, rotate = merge_options(
+        options, grid_size, max_colors, brick_types, allow_rotate
+    )
 
     return await analyze_image_to_guide(
         image=image,
         grid_w=grid_w,
         grid_h=grid_h,
         max_colors=colors,       # None이면 제한 없음
-        brick_types=bt_list,     # None이면 기본 "plate"
+        brick_types=bt_list,     # None이면 기본 1x1로 타일링
+        allow_rotate=rotate,     # True면 1x3 <-> 3x1 자동 배치 가능
     )
