@@ -216,6 +216,7 @@ async def analyze_image_to_guide(
     palette = [
         PaletteItem(
             color=hex_code,
+            hex=hex_code,
             name=data["name"],
             count=data["count"],
             types=sorted(list(data["types"])),
