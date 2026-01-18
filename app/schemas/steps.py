@@ -1,7 +1,8 @@
 # app/schemas/steps.py
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from __future__ import annotations
 
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, ConfigDict, Field
 
 class Placement(BaseModel):
     id: Optional[str] = None
@@ -12,16 +13,30 @@ class Placement(BaseModel):
     color: str
     type: str
 
+class PartSummaryItem(BaseModel):
+    type: str
+    color: str
+    count: int
 
-class StepsRequest(BaseModel):
-    placements: List[Placement]
-    meta: Optional[Dict[str, Any]] = None
-    rows_per_step: int = Field(2, ge=1, le=16)
-    max_placements_per_step: int = Field(256, ge=16, le=2000)
+class StepBBox(BaseModel):
+    minX: int
+    minY: int
+    maxX: int
+    maxY: int
 
+class StepStats(BaseModel):
+    placements: int
+    studs: int
 
 class StepV2(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     index: int
+    section_id: Optional[int] = Field(default=None, alias="sectionId")
     title: str
     description: Optional[str] = None
     placements: List[Placement]
+
+    parts_summary: List[PartSummaryItem] = Field(default_factory=list, alias="partsSummary")
+    bbox: Optional[StepBBox] = None
+    stats: Optional[StepStats] = None

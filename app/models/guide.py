@@ -1,4 +1,4 @@
-# ai-server/app/models/guide.py
+# app/models/guide.py
 from pydantic import BaseModel
 from typing import List, Optional, Literal
 from datetime import datetime
@@ -20,12 +20,12 @@ class GuideSummary(BaseModel):
 class GuideStep(BaseModel):
     id: int
     title: str
-    description: Optional[str] = None
+    description: str
     bricks: List[Brick]
 
 class PaletteItem(BaseModel):
-    color: str
-    name: Optional[str] = None
+    hex: str
+    name: Optional[str]
     count: int
     types: List[str]
 
@@ -36,13 +36,10 @@ class GuideMeta(BaseModel):
     source: Optional[Literal["sample", "ai"]] = "ai"
 
 class GuideResponse(BaseModel):
+    # STEP1 ↔ STEP2 연결 토큰
+    analysisId: Optional[str] = None
+
     summary: GuideSummary
     groups: List[GuideStep]
     palette: List[PaletteItem]
     meta: Optional[GuideMeta] = None
-
-class GuideOptions(BaseModel):
-    targetWidth: Optional[int] = None
-    targetHeight: Optional[int] = None
-    maxBricks: Optional[int] = None
-    colorPalette: Optional[list[str]] = None
