@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, List, Optional, Tuple, Dict
+from typing import Any, List, Optional, Tuple
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 
@@ -11,10 +11,7 @@ from app.image_analysis import analyze_image_to_guide
 from app.services.analysis_store import AnalysisStore
 from app.services.step_generator import generate_steps_by_rows
 
-# STEP2 요청/응답 스키마(너가 만든 app/schemas/build.py 기준)
 from app.schemas.build import BuildStepsRequest, BuildStepsResponse
-
-# SSOT 스키마(steps/sections/bricks 포함)
 from app.schemas.guide import (
     GuideResponse,
     GuideSummary,
@@ -29,14 +26,11 @@ from app.schemas.guide import (
 )
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/api/guide", tags=["guide"])
 
-# grid / color 정책
 ALLOWED_GRID = {"16x16": (16, 16), "32x32": (32, 32), "48x48": (48, 48)}
 ALLOWED_COLORS = {8, 16, 24}
 
-# 프론트 BRICK_TYPES와 맞추는 게 안전 (H-3)
 ALLOWED_BRICK_TYPES = {
     "1x1", "1x2", "1x3", "1x4", "1x5",
     "2x2", "2x3", "2x4", "2x5",
@@ -45,7 +39,6 @@ ALLOWED_BRICK_TYPES = {
 DEFAULT_GRID = (16, 16)
 DEFAULT_MAX_COLORS = 16
 
-# Method B 핵심: STEP1 결과를 임시 저장
 _analysis_store = AnalysisStore()
 
 
@@ -61,7 +54,6 @@ def parse_grid_size(grid_size: Optional[str]) -> Tuple[int, int]:
 
 
 def _to_int_or_none(v: Any) -> Optional[int]:
-    """options(JSON)에서 숫자가 str/float로 와도 안전하게 int로 변환"""
     if v is None:
         return None
     if isinstance(v, bool):
@@ -117,12 +109,10 @@ def _normalize_brick_types(bt: Optional[List[str]]) -> Optional[List[str]]:
     cleaned = [x.strip() for x in bt if isinstance(x, str) and x.strip()]
     cleaned = _dedupe_preserve_order(cleaned)
 
-    # 서버 기준 허용 타입만 남김
     cleaned = [x for x in cleaned if x in ALLOWED_BRICK_TYPES]
     if not cleaned:
         return None
 
-    # 1x1은 항상 포함
     if "1x1" not in cleaned:
         cleaned = ["1x1"] + cleaned
 
@@ -150,7 +140,6 @@ def _parse_brick_types_value(v: object) -> Optional[List[str]]:
         if not s:
             return None
 
-        # JSON 배열 문자열
         if s.startswith("["):
             try:
                 arr = json.loads(s)
@@ -159,7 +148,6 @@ def _parse_brick_types_value(v: object) -> Optional[List[str]]:
             except Exception:
                 pass
 
-        # 단일 값 또는 콤마 구분
         parts = [p.strip() for p in s.split(",") if p.strip()]
         return _normalize_brick_types(parts)
 
@@ -173,19 +161,15 @@ def merge_options(
     color_limit: Optional[int],
     brick_types: Optional[str],
     allowed_bricks: Optional[str],
-    brick_mode: Optional[str],  # 현재는 호환용(분석 로직에 필요하면 이후 확장)
+    brick_mode: Optional[str],
 ) -> tuple[int, int, Optional[int], Optional[List[str]]]:
-    # 1) 기본: 개별 Form 필드 기준
     grid_w, grid_h = parse_grid_size(grid_size)
 
-    # color_limit / max_colors 둘 다 들어올 수 있으니 우선순위 적용
     raw_color = max_colors if max_colors is not None else color_limit
     colors = parse_max_colors(raw_color)
 
-    # brick_types / allowed_bricks 둘 다 받을 수 있음
     bt_list = _parse_brick_types_value(brick_types) or _parse_brick_types_value(allowed_bricks)
 
-    # 2) options(JSON) 호환 처리
     if not options_json:
         return grid_w, grid_h, colors, bt_list
 
@@ -197,7 +181,6 @@ def merge_options(
     if not isinstance(obj, dict):
         return grid_w, grid_h, colors, bt_list
 
-    # grid: 최신/혼용 키 모두 허용
     gs = obj.get("gridSize") or obj.get("grid_size")
     if isinstance(gs, str):
         key = gs.replace(" ", "").lower()
@@ -206,7 +189,6 @@ def merge_options(
         else:
             raise HTTPException(status_code=422, detail=f"Invalid gridSize in options: {gs}")
 
-    # 과거 구조: grid:{width,height}
     g = obj.get("grid")
     if isinstance(g, dict):
         w = g.get("width")
@@ -218,9 +200,8 @@ def merge_options(
             else:
                 raise HTTPException(status_code=422, detail=f"Invalid grid in options: {w}x{h}")
 
-    # colors: 최신/혼용 키 모두 허용 (문자열 숫자도 방어)
-    mc = obj.get("maxColors") or obj.get("max_colors")
-    cl = obj.get("colorLimit") or obj.get("color_limit")
+    mc = obj["maxColors"] if "maxColors" in obj else obj.get("max_colors")
+    cl = obj["colorLimit"] if "colorLimit" in obj else obj.get("color_limit")
     mc_i = _to_int_or_none(mc)
     cl_i = _to_int_or_none(cl)
 
@@ -229,7 +210,6 @@ def merge_options(
     elif cl_i is not None:
         colors = parse_max_colors(cl_i)
 
-    # bricks: allowed_bricks / brick_types / brickTypes 등 모두 허용
     bt = (
         obj.get("allowed_bricks")
         or obj.get("allowedBricks")
@@ -246,7 +226,6 @@ def merge_options(
 
 
 def _pick(obj: Any, names: List[str]) -> Any:
-    """dict / pydantic model / 일반 객체 모두에서 first-hit 값을 꺼내는 헬퍼"""
     if obj is None:
         return None
     for n in names:
@@ -257,20 +236,46 @@ def _pick(obj: Any, names: List[str]) -> Any:
     return None
 
 
+def _hex_key(v: Any) -> str:
+    s = str(v or "").strip().upper()
+    if not s:
+        return ""
+    if not s.startswith("#"):
+        s = f"#{s}"
+    return s
+
+
+def _build_color_name_map(palette_like: Any) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not isinstance(palette_like, list):
+        return out
+
+    for p in palette_like:
+        hx = _hex_key(_pick(p, ["hex", "color"]))
+        if not hx:
+            continue
+        name = _pick(p, ["name", "colorName", "label"])
+        name_str = str(name).strip() if isinstance(name, str) else ""
+        out[hx] = name_str or hx
+
+    return out
+
+
+def _display_color_name(hex_str: str, name_map: Optional[dict[str, str]]) -> str:
+    hx = _hex_key(hex_str) or str(hex_str)
+    if not name_map:
+        return hx
+    return name_map.get(hx, hx)
+
+
 def _normalize_type(t: Any) -> str:
     s = str(t or "").strip().lower()
-    # STEP1은 1x1 기반이 안전 (image_analysis 내부 기본이 "plate")
     if s in ("", "plate", "tile", "plate_1x1", "tile_1x1", "1x1"):
         return "1x1"
-    # "2x4" 같은 값은 그대로
     return s
 
 
 def _brick_dims(brick_type: str) -> tuple[int, int]:
-    """
-    "2x5" -> (2,5)
-    그 외 -> (1,1)
-    """
     try:
         w, h = str(brick_type).lower().split("x")
         return (max(1, int(w)), max(1, int(h)))
@@ -278,22 +283,27 @@ def _brick_dims(brick_type: str) -> tuple[int, int]:
         return (1, 1)
 
 
-def _to_schema_brick(raw: Any, section_id: Optional[str] = None) -> GuideBrick:
+def _to_schema_brick(
+    raw: Any,
+    section_id: Optional[str] = None,
+    color_name_map: Optional[dict[str, str]] = None,
+) -> GuideBrick:
     x = int(_pick(raw, ["x"]) or 0)
     y = int(_pick(raw, ["y"]) or 0)
     z = int(_pick(raw, ["z"]) or 0)
 
-    color_hex = str(_pick(raw, ["color", "hex"]) or "#000000")
+    color_hex = _hex_key(_pick(raw, ["color", "hex"]) or "#000000")
     t = _normalize_type(_pick(raw, ["type"]))
-
     w, h = _brick_dims(t)
+
     return GuideBrick(
         id=f"{x},{y}:{t}",
         sectionId=section_id,
         x=x,
         y=y,
         z=z,
-        color=color_hex,
+        # ✅ color = 표시용(레고 색상명), hex = 렌더링용(HEX)
+        color=_display_color_name(color_hex, color_name_map),
         hex=color_hex,
         type=t,
         width=w,
@@ -348,7 +358,6 @@ def _make_sections(width: int, height: int, mode: str, rows_per_section: int) ->
                 )
         return out
 
-    # default: rows
     out: list[GuideSection] = []
     rows_per_section = max(1, int(rows_per_section))
     y = 0
@@ -372,15 +381,26 @@ def _in_bounds(b: GuideBrick, bounds: GuideBounds) -> bool:
     return (bounds.x <= b.x < bounds.x + bounds.w) and (bounds.y <= b.y < bounds.y + bounds.h)
 
 
-def _parts_summary(bricks: list[GuideBrick]) -> list[StepPartSummary]:
+def _parts_summary(
+    bricks: list[GuideBrick],
+    color_name_map: Optional[dict[str, str]] = None,
+) -> list[StepPartSummary]:
     counter: dict[tuple[str, str], int] = {}
     for b in bricks:
-        k = (b.type, b.hex)
+        hx = _hex_key(b.hex)
+        k = (b.type, hx)
         counter[k] = counter.get(k, 0) + 1
 
     out: list[StepPartSummary] = []
     for (t, hx), n in sorted(counter.items(), key=lambda x: (-x[1], x[0][0], x[0][1])):
-        out.append(StepPartSummary(type=t, hex=hx, color=hx, count=n))
+        out.append(
+            StepPartSummary(
+                type=t,
+                hex=hx,
+                color=_display_color_name(hx, color_name_map),
+                count=n,
+            )
+        )
     return out
 
 
@@ -390,8 +410,6 @@ async def analyze_guide(
     options: Optional[str] = Form(None),
     grid_size: Optional[str] = Form(None),
     max_colors: Optional[int] = Form(None),
-
-    # 프론트 호환 필드
     color_limit: Optional[int] = Form(None),
     brick_mode: Optional[str] = Form(None),
     brick_types: Optional[str] = Form(None),
@@ -400,7 +418,6 @@ async def analyze_guide(
     if not image:
         raise HTTPException(status_code=400, detail="이미지 파일이 필요합니다.")
 
-    # (1) merged 값 계산
     grid_w, grid_h, colors, bt_list = merge_options(
         options_json=options,
         grid_size=grid_size,
@@ -413,17 +430,14 @@ async def analyze_guide(
 
     logger.info("analyze merged grid=%sx%s colors=%s brickTypes=%s", grid_w, grid_h, colors, bt_list)
 
-    # (2) STEP1 분석은 1x1(plate) 기반으로 고정
-    # bt_list는 STEP2 최적화에서 쓰기 위해 store에 저장만 해둔다.
     raw = await analyze_image_to_guide(
         image=image,
         grid_w=grid_w,
         grid_h=grid_h,
-        max_colors=colors,      # None이면 제한 없음
-        brick_types=None,       # STEP1은 1x1 기반으로 고정
+        max_colors=colors,
+        brick_types=None,  # STEP1은 1x1 기반 고정
     )
 
-    # (3) schemas(SSOT)로 변환
     meta_raw = _pick(raw, ["meta"])
     summary_raw = _pick(raw, ["summary"])
     palette_raw = _pick(raw, ["palette"]) or []
@@ -453,18 +467,20 @@ async def analyze_guide(
             )
         )
 
+    # ✅ palette 기반 HEX->이름 맵
+    color_name_map = _build_color_name_map(palette)
+
     bricks: list[GuideBrick] = []
     for b in bricks_raw:
-        bricks.append(_to_schema_brick(b))
+        bricks.append(_to_schema_brick(b, color_name_map=color_name_map))
 
     groups: list[GuideStep] = []
     for g in groups_raw:
-        # 레거시 그룹은 유지(프론트 호환). STEP2는 steps/sections 사용 권장.
         gid = int(_pick(g, ["id"]) or 0)
         title = str(_pick(g, ["title"]) or "")
         desc = _pick(g, ["description"])
         g_bricks_raw = _pick(g, ["bricks"]) or []
-        g_bricks = [_to_schema_brick(x) for x in g_bricks_raw]
+        g_bricks = [_to_schema_brick(x, color_name_map=color_name_map) for x in g_bricks_raw]
         groups.append(GuideStep(id=gid, title=title, description=desc, bricks=g_bricks))
 
     meta = _to_schema_meta(meta_raw, width=width, height=height, source="ai")
@@ -473,7 +489,7 @@ async def analyze_guide(
     meta.sectionMode = None
     meta.optimized = False
 
-    # (4) STEP2용 payload 저장 + analysisId 발급
+    # ✅ STEP2용 저장(항상 HEX로 저장)
     analysis_id = _analysis_store.put(
         {
             "width": width,
@@ -483,8 +499,8 @@ async def analyze_guide(
                     "x": b.x,
                     "y": b.y,
                     "z": b.z,
-                    "color": b.hex,
-                    "type": "1x1",  # STEP1 저장은 항상 1x1 기반
+                    "color": b.hex,   # ✅ 저장은 HEX
+                    "type": "1x1",
                 }
                 for b in bricks
             ],
@@ -494,17 +510,15 @@ async def analyze_guide(
                 "brickTypes": bt_list or [],
             },
             "palette": [
-                {"color": p.color, "name": p.name, "count": p.count, "types": p.types}
+                {"hex": p.hex, "color": p.color, "name": p.name, "count": p.count, "types": p.types}
                 for p in palette
             ],
         }
     )
 
-    # (5) 응답
-    # 중요: schemas/guide.py의 GuideResponse에 analysisId 필드가 있어야 프론트로 내려간다.
     return GuideResponse(
         schemaVersion=1,
-        analysisId=analysis_id,   # guide.py에 Optional[str] analysisId 추가 필요
+        analysisId=analysis_id,
         summary=summary,
         groups=groups,
         bricks=bricks,
@@ -518,14 +532,6 @@ async def analyze_guide(
 
 @router.post("/steps", response_model=BuildStepsResponse)
 async def build_steps(req: BuildStepsRequest) -> BuildStepsResponse:
-    """
-    STEP2: analysisId 기반 조립 가이드 생성(on-demand)
-
-    현재 MVP:
-    - 저장된 1x1 placements를 섹션/스텝(행 기준)으로 쪼개어 반환
-    - step.bricks는 delta(이번 단계 추가분)
-    - partsSummary는 delta만 집계
-    """
     try:
         record = _analysis_store.get(req.analysisId)
     except KeyError:
@@ -541,7 +547,13 @@ async def build_steps(req: BuildStepsRequest) -> BuildStepsResponse:
     height = int(record.get("height", 16))
     raw_bricks = list(record.get("bricks", []))
 
-    all_bricks: list[GuideBrick] = [_to_schema_brick(b) for b in raw_bricks]
+    # ✅ record.palette 기반 HEX->이름 맵
+    color_name_map = _build_color_name_map(record.get("palette", []))
+
+    all_bricks: list[GuideBrick] = [
+        _to_schema_brick(b, color_name_map=color_name_map)
+        for b in raw_bricks
+    ]
 
     sections = _make_sections(width, height, req.sectionMode, req.rowsPerSection)
 
@@ -559,7 +571,7 @@ async def build_steps(req: BuildStepsRequest) -> BuildStepsResponse:
                 "y": b.y,
                 "w": b.width,
                 "h": b.height,
-                "color": b.hex,
+                "color": b.hex,  # ✅ 생성기는 HEX로만
                 "type": b.type,
             }
             for b in sec_bricks
@@ -576,7 +588,8 @@ async def build_steps(req: BuildStepsRequest) -> BuildStepsResponse:
             for p in s.get("placements", []):
                 t = _normalize_type(p.get("type"))
                 bw, bh = _brick_dims(t)
-                hx = str(p.get("color", "#000000"))
+
+                hx = _hex_key(p.get("color", "#000000"))
                 x = int(p.get("x", 0))
                 y = int(p.get("y", 0))
 
@@ -587,8 +600,8 @@ async def build_steps(req: BuildStepsRequest) -> BuildStepsResponse:
                         x=x,
                         y=y,
                         z=0,
-                        color=hx,
-                        hex=hx,
+                        color=_display_color_name(hx, color_name_map),  # ✅ 이름
+                        hex=hx,                                        # ✅ HEX
                         type=t,
                         width=bw,
                         height=bh,
@@ -604,7 +617,7 @@ async def build_steps(req: BuildStepsRequest) -> BuildStepsResponse:
                     title=f"{sec.name} · {step_index}단계",
                     description=str(s.get("description") or ""),
                     bricks=delta,
-                    partsSummary=_parts_summary(delta),
+                    partsSummary=_parts_summary(delta, color_name_map),
                 )
             )
             step_index += 1
