@@ -3,10 +3,18 @@ from datetime import datetime, timezone
 from io import BytesIO
 from typing import Dict, Any, Tuple, List, Optional
 import re
+from numbers import Integral
 
 import numpy as np
 from fastapi import UploadFile, HTTPException
 from PIL import Image
+
+# ✅ 안전 폴백: lego_colors 모듈/DB가 없으면 HEX 그대로 반환
+try:
+    from .services.lego_colors import resolve_lego_color_name  # type: ignore
+except Exception:
+    def resolve_lego_color_name(hex_color: str) -> str:  # type: ignore
+        return hex_color
 
 from .models.guide import (
     Brick,
@@ -28,22 +36,34 @@ def clamp_int(value: int, default: int, min_v: int, max_v: int) -> int:
     return max(min_v, min(max_v, value))
 
 
-def clamp_optional_int(value: int | None, default: int, min_v: int, max_v: int) -> int | None:
-    # None은 "제한 없음"
+def clamp_optional_int(value: Any, default: int, min_v: int, max_v: int) -> int | None:
+    """
+    - None: 제한 없음
+    - 0 이하: 제한 없음
+    - 문자열 숫자("0", "16", "16.0")도 허용
+    """
     if value is None:
-        return None
-
-    # 0 이하면 "제한 없음"
-    if isinstance(value, int) and not isinstance(value, bool) and value <= 0:
         return None
 
     if isinstance(value, bool):
         return default
 
-    if not isinstance(value, int):
-        return default
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return default
+        try:
+            value = int(float(s))
+        except Exception:
+            return default
 
-    return max(min_v, min(max_v, value))
+    if isinstance(value, Integral):
+        n = int(value)
+        if n <= 0:
+            return None
+        return max(min_v, min(max_v, n))
+
+    return default
 
 
 _BRICK_RE = re.compile(r"^(?P<w>\d+)x(?P<h>\d+)$")
@@ -58,8 +78,6 @@ def parse_brick_type_dims(brick_type: str) -> tuple[int, int]:
         return (1, 1)
 
     s = str(brick_type).strip().lower()
-
-    # "plate_2x5" 같은 형태도 허용하고 싶으면 여기서 확장 가능
     m = _BRICK_RE.match(s)
     if not m:
         return (1, 1)
@@ -70,7 +88,6 @@ def parse_brick_type_dims(brick_type: str) -> tuple[int, int]:
     except Exception:
         return (1, 1)
 
-    # 안전 범위
     w = max(1, min(64, w))
     h = max(1, min(64, h))
     return (w, h)
@@ -88,7 +105,6 @@ def select_brick_type(brick_types: Optional[List[str]]) -> str:
     if not cleaned:
         return "plate"
 
-    # 숫자형 "WxH"가 섞여 있으면 가장 큰 면적을 선택
     best = cleaned[0]
     best_area = 1
 
@@ -112,18 +128,12 @@ async def analyze_image_to_guide(
     """
     업로드된 이미지를 grid_w x grid_h 모자이크로 변환하고,
     행(row) 단위로 조립 가이드(groups/steps)를 생성합니다.
-
-    주의:
-    - 현재는 픽셀 1개당 Brick 1개 생성(1x1 방식)이라 totalBricks는 grid 크기에 고정됩니다.
-    - brick_types는 Brick.type 값/인벤토리 표기에 반영됩니다.
-      (큰 브릭으로 묶어서 개수를 줄이는 타일링 로직은 별도 구현이 필요)
     """
 
-    # grid는 항상 범위 제한
     grid_w = clamp_int(grid_w, 16, 8, 128)
     grid_h = clamp_int(grid_h, 16, 8, 128)
 
-    # max_colors는 None(제한 없음) 유지 + 숫자일 때만 clamp
+    # max_colors: None(제한 없음) 유지 + 0 이하도 제한 없음
     max_colors = clamp_optional_int(max_colors, 16, 2, 256)
 
     selected_type = select_brick_type(brick_types)
@@ -140,7 +150,6 @@ async def analyze_image_to_guide(
     resized = pil.resize((grid_w, grid_h), Image.NEAREST)
 
     # 3) 색상 수 제한
-    # max_colors=None 이면 제한 없음 -> quantize 스킵
     if max_colors is not None and max_colors < 256:
         try:
             method = getattr(Image, "MEDIANCUT", 0)
@@ -154,8 +163,10 @@ async def analyze_image_to_guide(
     bricks: List[Brick] = []
     palette_counter: Dict[str, Dict[str, Any]] = {}
 
-    # 4) 픽셀 단위로 Brick 생성 + 팔레트 카운트
-    # groupId는 "행 단위 그룹"과 맞추기 위해 (y+1)로 지정
+    # ✅ HEX->레고 이름 캐시 (성능)
+    color_name_cache: dict[str, str] = {}
+
+    # 4) 픽셀 단위 Brick + 팔레트 카운트
     for y in range(h):
         gid = y + 1
         for x in range(w):
@@ -167,21 +178,25 @@ async def analyze_image_to_guide(
                     x=x,
                     y=y,
                     z=0,
-                    color=hex_color,
+                    color=hex_color,  # ✅ Brick.color는 HEX 유지
                     type=selected_type if selected_type != "plate" else "plate",
                     groupId=gid,
                 )
             )
 
+            name = color_name_cache.get(hex_color)
+            if not name:
+                name = resolve_lego_color_name(hex_color)  # ✅ 여기서 이름 결정
+                color_name_cache[hex_color] = name
+
             bucket = palette_counter.setdefault(
                 hex_color,
-                {"name": hex_color, "count": 0, "types": set()},
+                {"name": name, "count": 0, "types": set()},
             )
             bucket["count"] += 1
             bucket["types"].add(selected_type if selected_type != "plate" else "plate")
 
     # 5) inventory
-    # 현재는 색상별로 동일 type 1종만 쌓이므로 단순 집계
     inv_type = "plate_1x1" if selected_type == "plate" else f"plate_{bt_w}x{bt_h}"
     inventory = [
         {
@@ -189,7 +204,8 @@ async def analyze_image_to_guide(
             "width": 1 if selected_type == "plate" else bt_w,
             "height": 1 if selected_type == "plate" else bt_h,
             "hex": hex_code,
-            "color": hex_code,
+            "color": data["name"],  # ✅ 표시용(이름)
+            "name": data["name"],
             "count": data["count"],
         }
         for hex_code, data in sorted(
@@ -199,7 +215,7 @@ async def analyze_image_to_guide(
         )
     ]
 
-    # 6) 조립 순서: 행(row) 단위 h 단계
+    # 6) steps (행 단위)
     steps: List[GuideStep] = []
     for y in range(h):
         row_bricks = bricks[y * w : (y + 1) * w]
@@ -212,7 +228,7 @@ async def analyze_image_to_guide(
             )
         )
 
-    # 7) palette 리스트
+    # 7) palette 리스트 (✅ name에 레고색상명)
     palette = [
         PaletteItem(
             color=hex_code,
@@ -230,7 +246,7 @@ async def analyze_image_to_guide(
 
     # 8) summary / meta / tips
     total_bricks = len(bricks)
-    unique_colors = len(palette)  # 기존 API의 uniqueTypes가 사실상 "유니크 색상 수"로 쓰이는 상황 유지
+    unique_colors = len(palette)
 
     if total_bricks <= 128:
         difficulty = "초급"
