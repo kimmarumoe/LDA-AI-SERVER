@@ -4,3 +4,5 @@ python-multipart
 pillow
 numpy
 pydantic
+python-dotenv
+pwdlib[argon2]>=0.3,<0.4
