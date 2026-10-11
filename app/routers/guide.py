@@ -1,8 +1,8 @@
-# app/routers/guide.py
 from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, List, Optional, Tuple
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
@@ -28,7 +28,28 @@ from app.schemas.guide import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/guide", tags=["guide"])
 
-ALLOWED_GRID = {"16x16": (16, 16), "32x32": (32, 32), "48x48": (48, 48)}
+# 그리드 정책: 커스텀 허용 범위 (프론트와 동일)
+GRID_MIN = 8
+GRID_MAX = 128
+
+# 프리셋은 "UI 대표값" (검증은 범위 기반이므로 꼭 필요하진 않지만, 디버깅/문서화에 유용)
+GRID_PRESETS = {"16x16": (16, 16), "32x32": (32, 32), "48x48": (48, 48)}
+
+# "64x80", "64×80", "64*80", "64", "64,80" (정사각형 단축 포함) 지원
+# - 입력에서 자주 섞이는 구분자(×, ✕, ✖, *, ＊, fullwidth x 등)를 모두 "x"로 정규화한다.
+# - Zero-width/BOM 같이 눈에 안 보이는 문자까지 제거해, "겉으로는 128x128인데 매칭이 안 되는" 케이스를 방지한다.
+_GRID_RE = re.compile(r"^(?P<w>\d+)(?:x(?P<h>\d+))?$")
+_INVISIBLE_RE = re.compile(r"[\s\u200b\u200c\u200d\ufeff]+")
+
+def _normalize_grid_size_str(raw: Optional[str]) -> str:
+    s = str(raw or "")
+    s = s.strip().lower()
+    s = _INVISIBLE_RE.sub("", s)
+    for ch in ("×", "✕", "✖", "*", "＊", "ｘ", ",", ":"):
+        s = s.replace(ch, "x")
+    return s
+
+
 ALLOWED_COLORS = {8, 16, 24}
 
 ALLOWED_BRICK_TYPES = {
@@ -43,14 +64,42 @@ _analysis_store = AnalysisStore()
 
 
 def parse_grid_size(grid_size: Optional[str]) -> Tuple[int, int]:
+    """
+    허용:
+    - "16x16", "64x80" (구분자 x/×/✕/✖/*/콤마/콜론 등 허용)
+    - "64" (정사각형 단축 -> 64x64)
+    정책:
+    - 각 변 GRID_MIN~GRID_MAX
+    """
     if not grid_size:
         return DEFAULT_GRID
 
-    key = grid_size.replace(" ", "").lower()
-    if key not in ALLOWED_GRID:
-        raise HTTPException(status_code=422, detail=f"Invalid grid_size: {grid_size}")
+    s = _normalize_grid_size_str(grid_size)
+    if not s:
+        return DEFAULT_GRID
 
-    return ALLOWED_GRID[key]
+    if s in GRID_PRESETS:
+        return GRID_PRESETS[s]
+
+    # "64" 같은 정사각형 단축
+    if s.isdigit():
+        w = int(s)
+        h = w
+    else:
+        m = _GRID_RE.match(s)
+        if not m:
+            raise HTTPException(status_code=422, detail=f"Invalid grid_size: {grid_size}")
+
+        w = int(m.group("w"))
+        h = int(m.group("h")) if m.group("h") is not None else w
+
+    if not (GRID_MIN <= w <= GRID_MAX) or not (GRID_MIN <= h <= GRID_MAX):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Grid out of range: {w}x{h} (allowed {GRID_MIN}~{GRID_MAX})",
+        )
+
+    return (w, h)
 
 
 def _to_int_or_none(v: Any) -> Optional[int]:
@@ -181,24 +230,23 @@ def merge_options(
     if not isinstance(obj, dict):
         return grid_w, grid_h, colors, bt_list
 
+    # options.gridSize / options.grid_size
     gs = obj.get("gridSize") or obj.get("grid_size")
     if isinstance(gs, str):
-        key = gs.replace(" ", "").lower()
-        if key in ALLOWED_GRID:
-            grid_w, grid_h = ALLOWED_GRID[key]
-        else:
-            raise HTTPException(status_code=422, detail=f"Invalid gridSize in options: {gs}")
+        grid_w, grid_h = parse_grid_size(gs)
 
+    # options.grid = {width,height}
     g = obj.get("grid")
     if isinstance(g, dict):
-        w = g.get("width")
-        h = g.get("height")
-        if isinstance(w, int) and isinstance(h, int):
-            key = f"{w}x{h}".lower()
-            if key in ALLOWED_GRID:
-                grid_w, grid_h = ALLOWED_GRID[key]
-            else:
-                raise HTTPException(status_code=422, detail=f"Invalid grid in options: {w}x{h}")
+        w = _to_int_or_none(g.get("width"))
+        h = _to_int_or_none(g.get("height"))
+        if w is not None and h is not None:
+            if not (GRID_MIN <= w <= GRID_MAX) or not (GRID_MIN <= h <= GRID_MAX):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Grid out of range in options: {w}x{h} (allowed {GRID_MIN}~{GRID_MAX})",
+                )
+            grid_w, grid_h = (w, h)
 
     mc = obj["maxColors"] if "maxColors" in obj else obj.get("max_colors")
     cl = obj["colorLimit"] if "colorLimit" in obj else obj.get("color_limit")
@@ -302,7 +350,6 @@ def _to_schema_brick(
         x=x,
         y=y,
         z=z,
-        # ✅ color = 표시용(레고 색상명), hex = 렌더링용(HEX)
         color=_display_color_name(color_hex, color_name_map),
         hex=color_hex,
         type=t,
@@ -467,7 +514,6 @@ async def analyze_guide(
             )
         )
 
-    # ✅ palette 기반 HEX->이름 맵
     color_name_map = _build_color_name_map(palette)
 
     bricks: list[GuideBrick] = []
@@ -489,7 +535,6 @@ async def analyze_guide(
     meta.sectionMode = None
     meta.optimized = False
 
-    # ✅ STEP2용 저장(항상 HEX로 저장)
     analysis_id = _analysis_store.put(
         {
             "width": width,
@@ -499,7 +544,7 @@ async def analyze_guide(
                     "x": b.x,
                     "y": b.y,
                     "z": b.z,
-                    "color": b.hex,   # ✅ 저장은 HEX
+                    "color": b.hex,
                     "type": "1x1",
                 }
                 for b in bricks
@@ -547,7 +592,6 @@ async def build_steps(req: BuildStepsRequest) -> BuildStepsResponse:
     height = int(record.get("height", 16))
     raw_bricks = list(record.get("bricks", []))
 
-    # ✅ record.palette 기반 HEX->이름 맵
     color_name_map = _build_color_name_map(record.get("palette", []))
 
     all_bricks: list[GuideBrick] = [
@@ -571,7 +615,7 @@ async def build_steps(req: BuildStepsRequest) -> BuildStepsResponse:
                 "y": b.y,
                 "w": b.width,
                 "h": b.height,
-                "color": b.hex,  # ✅ 생성기는 HEX로만
+                "color": b.hex,
                 "type": b.type,
             }
             for b in sec_bricks
@@ -600,8 +644,8 @@ async def build_steps(req: BuildStepsRequest) -> BuildStepsResponse:
                         x=x,
                         y=y,
                         z=0,
-                        color=_display_color_name(hx, color_name_map),  # ✅ 이름
-                        hex=hx,                                        # ✅ HEX
+                        color=_display_color_name(hx, color_name_map),
+                        hex=hx,
                         type=t,
                         width=bw,
                         height=bh,
