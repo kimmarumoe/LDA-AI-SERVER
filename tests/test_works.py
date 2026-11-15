@@ -102,3 +102,61 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(saved.status_code, 201, saved.text)
         detail = self.client.get('/api/auth/works/' + saved.json()["id"]).json()
         self.assertEqual(detail["steps"], generated.json()["steps"])
+
+    def test_rename_persists_and_preserves_guide(self):
+        work = self.save().json()
+        path = '/api/auth/works/' + work['id']
+        before = self.client.get(path).json()
+        renamed = self.client.patch(path, headers=self.headers, json={'title': '  바꾼 이름  '})
+        self.assertEqual(renamed.status_code, 200, renamed.text)
+        self.assertEqual(renamed.json(), {**work, 'title': '바꾼 이름'})
+        self.assertEqual(renamed.headers['cache-control'], 'no-store')
+        with TestClient(app, base_url='http://localhost:9000') as reopened:
+            reopened.cookies.update(self.client.cookies)
+            self.assertEqual(reopened.get(path).json(), {**before, 'title': '바꾼 이름'})
+        self.assertEqual(self.client.get('/api/auth/works').json()[0]['title'], '바꾼 이름')
+
+    def test_delete_removes_only_target_work_and_is_persistent(self):
+        removed = self.save().json()
+        kept = self.save(dict(self.payload, title='유지할 작품')).json()
+        path = '/api/auth/works/' + removed['id']
+        response = self.client.delete(path, headers=self.headers)
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.content, b'')
+        self.assertEqual(self.client.get(path).status_code, 404)
+        self.assertEqual(self.client.delete(path, headers=self.headers).status_code, 404)
+        self.assertEqual(self.client.get('/api/auth/works').json(), [kept])
+        with TestClient(app, base_url='http://localhost:9000') as reopened:
+            reopened.cookies.update(self.client.cookies)
+            self.assertEqual(reopened.get(path).status_code, 404)
+
+    def test_rename_and_delete_require_owner_and_valid_session(self):
+        work = self.save().json()
+        path = '/api/auth/works/' + work['id']
+        with TestClient(app, base_url='http://localhost:9000') as other:
+            self.login(other, 'second')
+            self.assertEqual(other.patch(path, headers=self.headers, json={'title': '탈취'}).status_code, 404)
+            self.assertEqual(other.delete(path, headers=self.headers).status_code, 404)
+        self.assertEqual(self.client.get(path).json()['title'], work['title'])
+        self.assertEqual(self.client.patch('/api/auth/works/missing', headers=self.headers, json={'title': '제목'}).status_code, 404)
+        self.assertEqual(self.client.delete('/api/auth/works/missing', headers=self.headers).status_code, 404)
+        self.client.post('/api/auth/logout', headers=self.headers)
+        self.assertEqual(self.client.patch(path, headers=self.headers, json={'title': '제목'}).status_code, 401)
+        self.assertEqual(self.client.delete(path, headers=self.headers).status_code, 401)
+
+    def test_rename_and_delete_validate_request_origin(self):
+        path = '/api/auth/works/' + self.save().json()['id']
+        for headers in ({}, {**self.headers, 'Origin': 'https://other.example'}, {'Origin': self.headers['Origin']}):
+            self.assertEqual(self.client.patch(path, headers=headers, json={'title': '제목'}).status_code, 403)
+            self.assertEqual(self.client.delete(path, headers=headers).status_code, 403)
+        self.assertEqual(self.client.get(path).status_code, 200)
+
+    def test_rename_rejects_invalid_input_and_accepts_boundaries(self):
+        work = self.save().json()
+        path = '/api/auth/works/' + work['id']
+        for payload in ({}, {'title': '  '}, {'title': '가'*81}, {'title': '새 이름', 'member_id': 2}, {'title': '새 이름', 'analysis': {}}, {'title': None}):
+            response = self.client.patch(path, headers=self.headers, json=payload)
+            self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(self.client.get(path).json()['title'], work['title'])
+        for title in ('가', '가'*80):
+            self.assertEqual(self.client.patch(path, headers=self.headers, json={'title': title}).status_code, 200)

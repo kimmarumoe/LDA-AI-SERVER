@@ -37,3 +37,13 @@ class WorkDetail(WorkSummary):
     analysis: GuideResponse
     steps: list[GuideBuildStep]
     options: dict
+
+
+class WorkRenameInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=80)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def clean_title(cls, value):
+        return value.strip() if isinstance(value, str) else value

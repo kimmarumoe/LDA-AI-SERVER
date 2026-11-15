@@ -49,3 +49,26 @@ def get_work(token, work_id):
         if row is None:
             raise LookupError("작품을 찾을 수 없습니다.")
         return {**summary(row), **json.loads(row["payload"])}
+
+
+def rename_work(token, work_id, title):
+    with connection() as db:
+        member = editable_member(db, token)
+        prepare(db)
+        cursor = db.execute("UPDATE works SET title = ? WHERE id = ? AND member_id = ?",
+                            (title, work_id, member["id"]))
+        if cursor.rowcount == 0:
+            raise LookupError("수정할 작품을 찾을 수 없습니다.")
+        row = db.execute("SELECT id, title, created_at FROM works WHERE id = ? AND member_id = ?",
+                         (work_id, member["id"])).fetchone()
+        return summary(row)
+
+
+def delete_work(token, work_id):
+    with connection() as db:
+        member = editable_member(db, token)
+        prepare(db)
+        # 게시글은 작품과 독립된 복사본이므로 여기서는 개인 작품만 삭제한다.
+        cursor = db.execute("DELETE FROM works WHERE id = ? AND member_id = ?", (work_id, member["id"]))
+        if cursor.rowcount == 0:
+            raise LookupError("삭제할 작품을 찾을 수 없습니다.")

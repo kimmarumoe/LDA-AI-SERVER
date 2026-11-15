@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from app.routers.auth import COOKIE_NAME, validate_mutation
-from app.schemas.works import WorkInput, WorkSummary, WorkDetail
+from app.schemas.works import WorkInput, WorkSummary, WorkDetail, WorkRenameInput
 from app.services import work_store
 
 router = APIRouter(prefix="/api/auth/works", tags=["works"])
@@ -29,3 +29,13 @@ def list_works(request: Request, response: Response):
 @router.get("/{work_id}", response_model=WorkDetail)
 def get_work(work_id: str, request: Request, response: Response):
     return run(request, response, work_store.get_work, work_id)
+
+
+@router.patch("/{work_id}", response_model=WorkSummary, dependencies=[Depends(validate_mutation)])
+def rename_work(work_id: str, payload: WorkRenameInput, request: Request, response: Response):
+    return run(request, response, work_store.rename_work, work_id, payload.title)
+
+
+@router.delete("/{work_id}", status_code=204, dependencies=[Depends(validate_mutation)])
+def delete_work(work_id: str, request: Request, response: Response):
+    run(request, response, work_store.delete_work, work_id)

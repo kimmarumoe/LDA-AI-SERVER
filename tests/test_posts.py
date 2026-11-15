@@ -113,3 +113,16 @@ class PostTests(unittest.TestCase):
         self.assertLessEqual(data['thumbnail']['height'], 24)
         self.assertLessEqual(len(data['thumbnail']['cells']), 24*24)
         self.assertEqual(data['description'], post['description'])
+
+    def test_work_management_api_keeps_public_post(self):
+        work, post = self.create()
+        work_path = '/api/auth/works/' + work['id']
+        post_path = '/api/auth/posts/' + post['id']
+        self.assertEqual(self.client.patch(work_path, headers=self.headers, json={'title': '개인 작품 새 이름'}).status_code, 200)
+        self.assertEqual(self.client.get(post_path).json(), post)
+        self.assertEqual(self.client.delete(work_path, headers=self.headers).status_code, 204)
+        with TestClient(app, base_url='http://localhost:9000') as guest:
+            public = guest.get(post_path)
+            self.assertEqual(public.status_code, 200)
+            self.assertEqual(public.json(), {**post, 'canEdit': False})
+        self.assertEqual(self.client.get('/api/auth/works').json(), [])
