@@ -10,3 +10,6 @@ venv/
 
 # macOS
 .DS_Store
+
+# 로컬 회원·세션 데이터
+/data/

@@ -88,6 +88,7 @@ class PaletteItem(BaseModel):
     팔레트 정보 (STEP 01/02 공통)
     """
     color: str
+    hex: str
     name: Optional[str] = None
     count: int
     types: List[str]

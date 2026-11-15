@@ -12,6 +12,9 @@ from starlette.middleware.cors import CORSMiddleware
 from app.core.env import app_env, cors_allow_origins, cors_allow_origin_regex
 from app.core.errors import error_payload, register_exception_handlers
 from app.routers.guide import router as guide_router
+from app.routers.auth import router as auth_router
+from app.routers.works import router as works_router
+from app.routers.posts import router as posts_router
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -71,7 +74,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content=error_payload(
             code="VALIDATION_ERROR",
             message="요청 값이 올바르지 않습니다.",
-            detail=exc.errors(),
+            detail=[{"loc": error["loc"], "msg": error["msg"], "type": error["type"]}
+                    for error in exc.errors()],
         ),
     )
 
@@ -93,3 +97,8 @@ async def health_check():
 
 
 app.include_router(guide_router)
+app.include_router(auth_router)
+
+app.include_router(works_router)
+
+app.include_router(posts_router)
