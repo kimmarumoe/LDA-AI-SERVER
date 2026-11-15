@@ -10,6 +10,9 @@ def prepare(db):
         id TEXT PRIMARY KEY, member_id INTEGER NOT NULL REFERENCES members(id),
         title TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)""")
     db.execute("CREATE INDEX IF NOT EXISTS works_member_created ON works(member_id, created_at DESC)")
+    db.execute("""CREATE TABLE IF NOT EXISTS work_progress (
+        work_id TEXT PRIMARY KEY REFERENCES works(id) ON DELETE CASCADE,
+        step_index INTEGER NOT NULL CHECK(step_index >= 0), saved_at TEXT NOT NULL)""")
 
 
 def summary(row):
@@ -48,7 +51,10 @@ def get_work(token, work_id):
                          (work_id, member["id"])).fetchone()
         if row is None:
             raise LookupError("작품을 찾을 수 없습니다.")
-        return {**summary(row), **json.loads(row["payload"])}
+        payload = json.loads(row["payload"])
+        progress = db.execute("SELECT step_index, saved_at FROM work_progress WHERE work_id = ?", (work_id,)).fetchone()
+        saved = {"stepIndex": min(progress["step_index"], max(0, len(payload["steps"]) - 1)), "savedAt": progress["saved_at"]} if progress else {"stepIndex": 0, "savedAt": None}
+        return {**summary(row), **payload, "progress": saved}
 
 
 def rename_work(token, work_id, title):
@@ -72,3 +78,24 @@ def delete_work(token, work_id):
         cursor = db.execute("DELETE FROM works WHERE id = ? AND member_id = ?", (work_id, member["id"]))
         if cursor.rowcount == 0:
             raise LookupError("삭제할 작품을 찾을 수 없습니다.")
+
+
+class InvalidProgress(ValueError):
+    pass
+
+
+def update_progress(token, work_id, step_index):
+    with connection() as db:
+        member = editable_member(db, token)
+        prepare(db)
+        row = db.execute("SELECT payload FROM works WHERE id = ? AND member_id = ?", (work_id, member["id"])).fetchone()
+        if row is None:
+            raise LookupError("진행 위치를 저장할 작품을 찾을 수 없습니다.")
+        total = len(json.loads(row["payload"])["steps"])
+        if not 0 <= step_index < total:
+            raise InvalidProgress("작품의 조립 단계 범위를 벗어났습니다.")
+        saved_at = datetime.now(timezone.utc).isoformat()
+        db.execute("""INSERT INTO work_progress (work_id, step_index, saved_at) VALUES (?, ?, ?)
+            ON CONFLICT(work_id) DO UPDATE SET step_index = excluded.step_index, saved_at = excluded.saved_at""",
+                   (work_id, step_index, saved_at))
+        return {"stepIndex": step_index, "savedAt": saved_at}

@@ -33,10 +33,16 @@ class WorkSummary(BaseModel):
     createdAt: str
 
 
+class WorkProgress(BaseModel):
+    stepIndex: int = Field(default=0, ge=0)
+    savedAt: str | None = None
+
+
 class WorkDetail(WorkSummary):
     analysis: GuideResponse
     steps: list[GuideBuildStep]
     options: dict
+    progress: WorkProgress = Field(default_factory=WorkProgress)
 
 
 class WorkRenameInput(BaseModel):
@@ -47,3 +53,8 @@ class WorkRenameInput(BaseModel):
     @classmethod
     def clean_title(cls, value):
         return value.strip() if isinstance(value, str) else value
+
+
+class WorkProgressInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    stepIndex: int = Field(ge=0, le=16383, strict=True)
