@@ -13,6 +13,8 @@ from app.core.env import app_env, cors_allow_origins, cors_allow_origin_regex
 from app.core.errors import error_payload, register_exception_handlers
 from app.routers.guide import router as guide_router
 from app.routers.auth import router as auth_router
+from app.routers.works import router as works_router
+from app.routers.posts import router as posts_router
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -96,3 +98,7 @@ async def health_check():
 
 app.include_router(guide_router)
 app.include_router(auth_router)
+
+app.include_router(works_router)
+
+app.include_router(posts_router)
