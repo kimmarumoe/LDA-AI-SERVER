@@ -8,6 +8,10 @@ from fastapi import HTTPException
 from app.services.auth_store import connection, editable_member, session_member
 from app.services.work_store import prepare as prepare_works
 from app.schemas.works import WorkInput
+from app.services.post_social_store import prepare as prepare_social, is_liked
+
+METRICS_SQL = """(SELECT COUNT(*) FROM post_likes l WHERE l.post_id = p.id) AS like_count,
+    (SELECT COUNT(*) FROM post_comments c WHERE c.post_id = p.id) AS comment_count"""
 
 
 def prepare(db):
@@ -17,6 +21,7 @@ def prepare(db):
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         snapshot TEXT NOT NULL, thumbnail TEXT NOT NULL)""")
     db.execute("CREATE INDEX IF NOT EXISTS posts_created ON posts(created_at DESC, id DESC)")
+    prepare_social(db)
 
 
 def thumbnail(analysis):
@@ -40,11 +45,11 @@ def thumbnail(analysis):
 def summary(row):
     return {"id": row["id"], "title": row["title"], "description": row["description"],
             "nickname": row["nickname"], "createdAt": row["created_at"], "updatedAt": row["updated_at"],
-            "thumbnail": json.loads(row["thumbnail"])}
+            "thumbnail": json.loads(row["thumbnail"]), "likeCount": row["like_count"], "commentCount": row["comment_count"]}
 
 
 def detail_row(db, post_id):
-    row = db.execute("SELECT p.*, m.nickname FROM posts p JOIN members m ON m.id = p.member_id WHERE p.id = ?", (post_id,)).fetchone()
+    row = db.execute(f"SELECT p.*, m.nickname, {METRICS_SQL} FROM posts p JOIN members m ON m.id = p.member_id WHERE p.id = ?", (post_id,)).fetchone()
     if row is None:
         raise LookupError("게시글을 찾을 수 없습니다.")
     return row
@@ -68,14 +73,14 @@ def create(token, payload):
         db.execute("INSERT INTO posts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                    (post_id, member["id"], payload.title, payload.description, now, now,
                     json.dumps(snapshot, ensure_ascii=False), json.dumps(cover)))
-        return {**summary(detail_row(db, post_id)), **snapshot, "canEdit": True}
+        return {**summary(detail_row(db, post_id)), **snapshot, "canEdit": True, "likedByMe": False}
 
 
 def list_posts(offset, limit):
     with connection() as db:
         prepare(db)
-        rows = db.execute("""SELECT p.id, p.title, substr(p.description, 1, 160) AS description,
-            p.created_at, p.updated_at, p.thumbnail, m.nickname FROM posts p
+        rows = db.execute(f"""SELECT p.id, p.title, substr(p.description, 1, 160) AS description,
+            p.created_at, p.updated_at, p.thumbnail, m.nickname, {METRICS_SQL} FROM posts p
             JOIN members m ON m.id = p.member_id ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?""", (limit + 1, offset)).fetchall()
         return {"items": [summary(row) for row in rows[:limit]], "hasMore": len(rows) > limit}
 
@@ -85,7 +90,8 @@ def get(post_id, token):
     with connection() as db:
         prepare(db)
         row = detail_row(db, post_id)
-        return {**summary(row), **json.loads(row["snapshot"]), "canEdit": bool(member and member["id"] == row["member_id"])}
+        return {**summary(row), **json.loads(row["snapshot"]), "canEdit": bool(member and member["id"] == row["member_id"]),
+                "likedByMe": is_liked(db, post_id, member["id"] if member else None)}
 
 
 def edit(token, post_id, payload):
@@ -98,7 +104,7 @@ def edit(token, post_id, payload):
         db.execute("UPDATE posts SET title = ?, description = ?, updated_at = ? WHERE id = ? AND member_id = ?",
                    (payload.title, payload.description, datetime.now(timezone.utc).isoformat(), post_id, member["id"]))
         updated = detail_row(db, post_id)
-        return {**summary(updated), **json.loads(updated["snapshot"]), "canEdit": True}
+        return {**summary(updated), **json.loads(updated["snapshot"]), "canEdit": True, "likedByMe": is_liked(db, post_id, member["id"])}
 
 
 def delete(token, post_id):

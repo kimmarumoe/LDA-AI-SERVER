@@ -38,6 +38,8 @@ class PostSummary(BaseModel):
     createdAt: str
     updatedAt: str
     thumbnail: Thumbnail
+    likeCount: int = Field(ge=0)
+    commentCount: int = Field(ge=0)
 
 
 class PostList(BaseModel):
@@ -49,3 +51,4 @@ class PostDetail(PostSummary):
     analysis: GuideResponse
     steps: list[GuideBuildStep]
     canEdit: bool
+    likedByMe: bool
